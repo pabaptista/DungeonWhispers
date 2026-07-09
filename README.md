@@ -10,7 +10,7 @@ Recording voice chats requires **all-party consent** in some jurisdictions. Make
 
 ## Status
 
-Early-stage. All pieces are wired together, but `/record start` → `/record stop` has **not been verified against a live Discord voice channel yet** — Discord's DAVE end-to-end voice encryption can break voice reception in py-cord, see [CLAUDE.md](CLAUDE.md#known-gotchas). Test with a short real session before trusting it for an actual table.
+Early-stage. `/record start` → `/record stop` has been confirmed working end-to-end against a live Discord voice channel. See [CLAUDE.md](CLAUDE.md#known-gotchas) for py-cord version quirks around voice encryption and sink cleanup.
 
 See [CLAUDE.md](CLAUDE.md) for the full architecture and design decisions.
 

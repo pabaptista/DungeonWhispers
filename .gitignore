@@ -1,5 +1,6 @@
 config.yml
 raw_audio/
+transcripts/
 *.ogg
 __pycache__/
 *.pyc
