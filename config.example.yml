@@ -1,0 +1,18 @@
+discord:
+  bot_token: "YOUR_DISCORD_BOT_TOKEN"
+
+ollama:
+  host: "http://localhost:11434"
+  model: "gemma4-unsloth-nothink:latest"  # or any local Ollama tag, e.g. hf.co/unsloth/gemma-4-E4B-it-qat-GGUF:UD-Q4_K_XL
+
+whisper:
+  model_size: "turbo"    # tiny, base, small, medium, large-v2, large-v3, turbo
+  device: "cpu"
+  compute_type: "int8"
+  language: null         # e.g. "en", or null to auto-detect
+  hf_token: null          # only needed for gated models
+
+players:
+  - discord_id: 123456789012345678
+    player_name: "Alice"
+    character_name: "Lyra Nightshade"

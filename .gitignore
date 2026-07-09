@@ -1,0 +1,7 @@
+config.yml
+raw_audio/
+*.ogg
+__pycache__/
+*.pyc
+.venv/
+venv/
