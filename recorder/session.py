@@ -10,6 +10,7 @@ class RecordingSession:
     text_channel: discord.TextChannel
     sink: discord.sinks.OGGSink = field(default_factory=discord.sinks.OGGSink)
     member_names: dict[int, str] = field(default_factory=dict)
+    name: str | None = None
 
 
 _active: dict[int, RecordingSession] = {}

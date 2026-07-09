@@ -1,5 +1,6 @@
 import datetime as dt
 import os
+import re
 
 import discord
 import yaml
@@ -17,10 +18,22 @@ with open("config.yml") as f:
 PLAYERS = {p["discord_id"]: p for p in CONFIG.get("players") or []}
 
 intents = discord.Intents.default()
+intents.members = True
 intents.voice_states = True
 bot = discord.Bot(intents=intents)
 
 record = discord.SlashCommandGroup("record", "Record and summarize the table's voice session.")
+
+IDLE_ACTIVITY = discord.Activity(type=discord.ActivityType.listening, name="/record start")
+
+
+@bot.event
+async def on_ready():
+    await bot.change_presence(status=discord.Status.online, activity=IDLE_ACTIVITY)
+
+
+def slugify(name: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9]+", "-", name).strip("-").lower()
 
 
 def speaker_name(discord_id: int, member_names: dict[int, str]) -> str:
@@ -31,7 +44,10 @@ def speaker_name(discord_id: int, member_names: dict[int, str]) -> str:
 
 
 @record.command(name="start", description="Join your voice channel and start recording.")
-async def record_start(ctx: discord.ApplicationContext):
+async def record_start(
+    ctx: discord.ApplicationContext,
+    name: discord.Option(str, "Name for this session, e.g. 'Session 10' (default: date/time)", required=False) = None,
+):
     if ctx.author.voice is None:
         await ctx.respond("Join a voice channel first.")
         return
@@ -42,11 +58,14 @@ async def record_start(ctx: discord.ApplicationContext):
     channel = ctx.author.voice.channel
     voice_client = await channel.connect()
     session = rec_session.start(ctx.guild.id, voice_client, ctx.channel)
+    session.name = name
     session.member_names = {m.id: m.display_name for m in channel.members if not m.bot}
     voice_client.start_recording(session.sink, None)
+    await bot.change_presence(status=discord.Status.dnd, activity=discord.Game(name="\U0001f534 Recording session"))
 
+    title = f" **{name}**" if name else ""
     await ctx.respond(
-        f"\U0001f534 Recording started in **{channel.name}**. Everyone speaking in this channel is being "
+        f"\U0001f534 Recording{title} started in **{channel.name}**. Everyone speaking in this channel is being "
         "recorded and transcribed for a session summary — speak now if that's not OK with you."
     )
 
@@ -65,14 +84,17 @@ async def record_stop(ctx: discord.ApplicationContext):
         await ctx.respond("No recording in progress.")
         return
 
-    await ctx.respond("Stopping recording — transcribing and summarizing, this can take a while.")
+    await ctx.respond("⏹️ Recording stopped. Transcribing and summarizing — this can take a while.")
+    await bot.change_presence(status=discord.Status.idle, activity=discord.Game(name="\U0001f4dd Summarizing session..."))
 
     session.voice_client.stop_recording()
     session.sink.cleanup()  # runs ffmpeg per speaker (blocking); fine for a handful of players
     await session.voice_client.disconnect()
     rec_session.end(ctx.guild.id)
 
-    session_id = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    session_id = f"{timestamp}_{slugify(session.name)}" if session.name else timestamp
+    display_name = session.name or timestamp
     audio_paths = save_audio(session.sink, session_id)
 
     whisper_cfg = CONFIG["whisper"]
@@ -102,12 +124,13 @@ async def record_stop(ctx: discord.ApplicationContext):
     os.makedirs("transcripts", exist_ok=True)
     out_path = f"transcripts/{session_id}.md"
     with open(out_path, "w") as f:
-        f.write(f"# Session {session_id}\n\n## Summary\n\n{summary}\n\n## Full Transcript\n\n{transcript_text}\n")
+        f.write(f"# {display_name}\n\n## Summary\n\n{summary}\n\n## Full Transcript\n\n{transcript_text}\n")
 
     for path in audio_paths.values():
         os.remove(path)
 
-    await ctx.channel.send(f"**Session Recap**\n\n{summary}\n\nFull transcript saved to `{out_path}`.")
+    await ctx.channel.send(f"**Session Recap — {display_name}**\n\n{summary}\n\nFull transcript saved to `{out_path}`.")
+    await bot.change_presence(status=discord.Status.online, activity=IDLE_ACTIVITY)
 
 
 bot.add_application_command(record)
