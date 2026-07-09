@@ -10,19 +10,16 @@ Recording voice chats requires **all-party consent** in some jurisdictions. Make
 
 ## Status
 
-Early-stage. Not all pieces are wired together yet:
-
-- ✅ `transcription/whisper_backend.py` — works standalone
-- ✅ `summarization/ollama_client.py` — works standalone
-- ❌ `bot.py`, `recorder/`, `transcription/merge.py` — not built yet
+Early-stage. All pieces are wired together, but `/record start` → `/record stop` has **not been verified against a live Discord voice channel yet** — Discord's DAVE end-to-end voice encryption can break voice reception in py-cord, see [CLAUDE.md](CLAUDE.md#known-gotchas). Test with a short real session before trusting it for an actual table.
 
 See [CLAUDE.md](CLAUDE.md) for the full architecture and design decisions.
 
 ## Requirements
 
 - Python 3.11+
+- **`ffmpeg`** on `PATH` (used to encode recorded audio to OGG — not a pip package, install via your OS package manager)
 - [Ollama](https://ollama.com) installed, running (`ollama serve`), with a model pulled (e.g. `ollama pull gemma4-unsloth-nothink:latest` or any other local chat model)
-- A Discord bot token (once `bot.py` lands) with voice + message permissions
+- A Discord bot token with voice + message permissions, invited to your server with the `applications.commands` and `bot` scopes
 
 ## Setup
 
@@ -43,7 +40,15 @@ Edit `config.yml`:
 
 `config.yml` is gitignored — never commit it.
 
-## Trying the pieces that exist today
+## Running the bot
+
+```bash
+python3 bot.py
+```
+
+In a voice channel: `/record start` to begin, `/record stop` to end. The bot transcribes each speaker, merges them into one timeline, summarizes it with your local Ollama model, posts the recap in the text channel, and saves the full transcript to `transcripts/`.
+
+## Trying individual pieces
 
 ```bash
 # transcription: transcribes test.ogg using config.yml's whisper settings

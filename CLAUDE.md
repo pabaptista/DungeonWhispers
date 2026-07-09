@@ -12,7 +12,7 @@ Early-stage side project. Architecture is decided; implementation is in progress
 
 - **Language:** Python 3.11+
 - **Discord library:** `py-cord` (fork of discord.py with voice-receive support via `discord.sinks`)
-- **Audio format:** OGG/Opus (`discord.sinks.OGGSink`) — Discord's voice data is already Opus-encoded, so we save directly to OGG rather than decoding to WAV, avoiding both a conversion step and the storage bloat of raw WAV over multi-hour sessions.
+- **Audio format:** OGG (`discord.sinks.OGGSink`) — py-cord decodes incoming Opus to PCM per speaker internally (for its mixing/filter support), then `OGGSink` shells out to **`ffmpeg`** to re-encode that PCM to OGG on `sink.cleanup()`. Requires `ffmpeg` on `PATH`; it is not a pip dependency.
 - **Transcription:** `faster-whisper` (CTranslate2-based, not PyTorch) — avoids the CUDA/CPU torch wheel confusion of the original `openai-whisper` package, and is faster on CPU for long sessions.
 - **Summarization:** Local LLM via [Ollama](https://ollama.com) (default model `gemma-4-E4B`, quantized GGUF) — no external API calls, entire pipeline (voice capture → transcription → summarization) runs fully offline/self-hosted.
 - **Config:** YAML (`config.yml`, gitignored; `config.example.yml` committed)
@@ -73,8 +73,10 @@ DungeonWhispers/
 - `openai-whisper` pulls in PyTorch, and pip's default wheel often includes CUDA libraries even on CPU-only machines, causing a large unwanted download. `faster-whisper` avoids this entirely (no PyTorch dependency), which is the main reason it's the chosen backend here.
 - Discord voice-receive is not part of vanilla `discord.py`; must use `py-cord` or `discord-ext-voice-recv`.
 - Summarization requires the Ollama daemon running locally (`ollama serve`) with the configured model already pulled (`ollama pull <model>`); `ollama_client.py` does not auto-pull.
+- **Discord's DAVE (End-to-End Encryption) protocol for voice channels can break voice reception entirely.** py-cord 2.7+ ships a `davey` package (installed via `py-cord[voice]`) that implements DAVE decryption, and `VoiceClient.start_recording`/`stop_recording` still emit a `RuntimeWarning` that reception "may not work as expected." This has **not been verified against a live voice channel** — test `/record start` → `/record stop` early with a short real session before relying on it. Track upstream status: https://github.com/Pycord-Development/pycord/issues/3139
+- `OGGSink.cleanup()` is **not called automatically** when recording stops (dead code in py-cord 2.8's `AudioReader._stop`) — `bot.py` calls `session.sink.cleanup()` explicitly after `stop_recording()`. It also runs `ffmpeg` synchronously per speaker, blocking the event loop briefly; fine for a handful of players, revisit with `asyncio.to_thread` if it grows.
 
-## Commands / Workflow (once implemented)
+## Commands / Workflow
 
 - `/record start` — bot joins the caller's current voice channel and begins per-speaker recording
 - `/record stop` — bot stops recording, triggers transcription → merge → summarization pipeline, posts result

@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from functools import lru_cache
 
 from faster_whisper import WhisperModel
 
@@ -10,6 +11,11 @@ class Segment:
     text: str
 
 
+@lru_cache(maxsize=4)
+def _load_model(model_size: str, device: str, compute_type: str, hf_token: str | None) -> WhisperModel:
+    return WhisperModel(model_size, device=device, compute_type=compute_type, use_auth_token=hf_token)
+
+
 def transcribe(
     audio_path: str,
     model_size: str = "turbo",
@@ -18,12 +24,7 @@ def transcribe(
     language: str | None = None,
     hf_token: str | None = None,
 ) -> list[Segment]:
-    model = WhisperModel(
-        model_size,
-        device=device,
-        compute_type=compute_type,
-        use_auth_token=hf_token,
-    )
+    model = _load_model(model_size, device, compute_type, hf_token)
     segments, _info = model.transcribe(audio_path, beam_size=5, language=language)
     return [Segment(s.start, s.end, s.text) for s in segments]
 
