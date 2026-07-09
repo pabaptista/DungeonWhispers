@@ -22,12 +22,12 @@ Early-stage side project. Architecture is decided; implementation is in progress
 ```
 Discord Voice Channel
   → py-cord voice listener (per-user audio sink, OGG/Opus)
-  → raw_audio/{user_id}.ogg per speaker
-  → faster-whisper transcription per track (timestamped segments)
+  → raw_audio/{session_id}_{user_id}.ogg per speaker (session_id = timestamp, optionally + slugified session name)
+  → faster-whisper transcription per track (timestamped segments), each also dumped to transcripts/{session_id}_{speaker}.md
   → merge all speakers' segments into one chronological timeline
-  → tag each line with character name via config.yml (Discord ID → player → character)
+  → tag each line with character name via config.yml (Discord ID → player → character), falling back to Discord display name if unmapped
   → local Ollama summarization (D&D-recap system prompt)
-  → output: posted to a Discord text channel + saved as markdown file
+  → output: posted to a Discord text channel + saved as transcripts/{session_id}.md
 ```
 
 ## Project Structure
@@ -46,8 +46,8 @@ DungeonWhispers/
 │   └── ollama_client.py    # Local Ollama call wrapper (default model: gemma-4-E4B)
 ├── config.example.yml      # Template: Discord ID → player name → character name mapping
 ├── config.yml              # Real config (gitignored)
-├── raw_audio/              # Temp OGG files, deleted after transcription (gitignored)
-├── transcripts/            # Output markdown transcripts + summaries
+├── raw_audio/              # Per-speaker OGG files (gitignored). NOT auto-deleted right now — see Conventions.
+├── transcripts/            # Merged + per-speaker markdown transcripts, summaries (gitignored)
 ├── requirements.txt
 ├── README.md
 └── CLAUDE.md / AGENTS.md   # This file
@@ -58,7 +58,7 @@ DungeonWhispers/
 - **Config over hardcoding:** Discord IDs, character name mappings, model sizes, and prompts live in `config.yml`, never hardcoded in source.
 - **No secrets in git:** Discord bot token and `config.yml` are gitignored. Only `config.example.yml` (with placeholder values) is committed.
 - **Pluggable transcription backend:** Keep `transcription/whisper_backend.py` behind a simple interface (e.g. `transcribe(audio_path, language=None) -> list[Segment]`) so a different backend (API-based, different local model) can be swapped in without touching the rest of the pipeline.
-- **Delete raw audio after processing:** Multi-hour OGG tracks per speaker add up; once a transcript is generated and verified, raw audio in `raw_audio/` should be cleaned up (either automatically after N days, or via a `--keep-audio` flag override).
+- **Delete raw audio after processing (currently disabled):** Multi-hour OGG tracks per speaker add up and should eventually be cleaned up after a transcript is generated and verified. **For now, while the recording/transcription pipeline is still being debugged, `bot.py` keeps `raw_audio/*.ogg` and the per-speaker debug transcripts in `transcripts/` — nothing is deleted.** Re-add cleanup (auto after N days, or a `--keep-audio` override) once the pipeline is trusted.
 - **Type hints throughout:** Coming from a .NET background, prefer explicit type hints on function signatures over relying on inference — makes the codebase easier to navigate for contributors from typed-language backgrounds.
 - **Privacy/consent note:** Recording voice chats has all-party-consent implications in some jurisdictions. The README must carry a clear disclaimer; the bot should also announce itself (e.g. a join message) when it starts recording.
 
@@ -81,8 +81,9 @@ DungeonWhispers/
 
 ## Commands / Workflow
 
-- `/record start` — bot joins the caller's current voice channel and begins per-speaker recording
-- `/record stop` — bot stops recording, triggers transcription → merge → summarization pipeline, posts result
+- `/record start [name]` — bot joins the caller's current voice channel and begins per-speaker recording. `name` is optional (e.g. `"Session 10"`); defaults to a timestamp if omitted. Warns in the text channel if any speaker present isn't mapped in `config.yml` yet. Sets bot presence to 🔴 "Recording session" (status: dnd).
+- `/record stop` — bot stops recording, triggers transcription → merge → summarization pipeline, posts the recap + transcript path in the text channel. Sets presence to 📝 "Summarizing session..." (status: idle) while working, then back to idle listening for `/record start` when done.
+- `python3 bot.py [-v|--verbose]` — `-v` raises terminal log level from `WARNING` to `INFO`, printing per-step progress (join, transcribe per speaker, merge, summarize, save, cleanup).
 
 ## For AI Agents Working on This Repo
 

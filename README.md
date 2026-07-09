@@ -43,10 +43,13 @@ Edit `config.yml`:
 ## Running the bot
 
 ```bash
-python3 bot.py
+python3 bot.py            # quiet
+python3 bot.py --verbose  # print progress (join, transcribe, summarize, ...) to the terminal
 ```
 
-In a voice channel: `/record start` to begin, `/record stop` to end. The bot transcribes each speaker, merges them into one timeline, summarizes it with your local Ollama model, posts the recap in the text channel, and saves the full transcript to `transcripts/`.
+In a voice channel: `/record start [name]` to begin (e.g. `/record start name:"Session 10"` — optional, defaults to a timestamp), `/record stop` to end. The bot transcribes each speaker, merges them into one timeline, summarizes it with your local Ollama model, posts the recap in the text channel, and saves the merged transcript to `transcripts/`.
+
+Raw audio (`raw_audio/`) and each speaker's individual transcript are currently kept, not deleted, to make debugging easier — both are gitignored.
 
 ## Trying individual pieces
 
