@@ -13,6 +13,7 @@ def summarize(
         "prompt": transcript,
         "system": system_prompt,
         "stream": False,
+        "think": False,
     }
     req = urllib.request.Request(
         f"{host}/api/generate",
