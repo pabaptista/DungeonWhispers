@@ -12,13 +12,16 @@ Recording voice chats requires **all-party consent** in some jurisdictions. Make
 
 Early-stage. `/record start` → `/record stop` has been confirmed working end-to-end against a live Discord voice channel. See [CLAUDE.md](CLAUDE.md#known-gotchas) for py-cord version quirks around voice encryption and sink cleanup.
 
+⚠️ **Regular py-cord (PyPI) currently cannot record voice** — Discord's DAVE end-to-end voice encryption breaks voice reception on stock py-cord. This project only works with the fork branch fixing it, see [Requirements](#requirements).
+
 See [CLAUDE.md](CLAUDE.md) for the full architecture and design decisions.
 
 ## Requirements
 
 - Python 3.11+
+- **py-cord from `Pycord-Development/pycord@fix/voice-rec-2`, not the PyPI release.** Stock py-cord (even latest) fails to decode voice due to Discord's DAVE E2EE protocol; this branch fixes it (see [PR #3159](https://github.com/Pycord-Development/pycord/pull/3159)). Confirmed working against a live voice channel with this branch — that's what `requirements.txt` installs.
 - **`ffmpeg`** on `PATH` (used to encode recorded audio to OGG — not a pip package, install via your OS package manager)
-- [Ollama](https://ollama.com) installed, running (`ollama serve`), with a model pulled (e.g. `ollama pull gemma4-unsloth-nothink:latest` or any other local chat model)
+- [Ollama](https://ollama.com) installed, running (`ollama serve`), with a model pulled (e.g. `ollama pull gemma4:e4b-it-qat` or any other local chat model)
 - A Discord bot token with voice + message permissions, invited to your server with the `applications.commands` and `bot` scopes
 
 ## Setup
@@ -30,6 +33,8 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp config.example.yml config.yml
 ```
+
+`requirements.txt` installs py-cord straight from the `fix/voice-rec-2` branch (git), not PyPI — that's what makes voice recording actually work. Once [PR #3159](https://github.com/Pycord-Development/pycord/pull/3159) merges and ships in a PyPI release, `requirements.txt` can switch back to a normal version pin.
 
 Edit `config.yml`:
 
