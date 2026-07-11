@@ -6,7 +6,7 @@ def test_slugify_lowercases_and_hyphenates():
 
 
 def test_slugify_strips_leading_trailing_punctuation():
-    assert slugify("  !!Eris Thornveil!!  ") == "eris-thornveil"
+    assert slugify("  !!Grog Stonefist!!  ") == "grog-stonefist"
 
 
 def test_slugify_collapses_runs_of_punctuation():
@@ -18,8 +18,8 @@ def test_slugify_empty_string():
 
 
 def test_speaker_name_uses_character_name_when_mapped():
-    players = {123: {"character_name": "Eris Thornveil", "player_name": "Pedro"}}
-    assert speaker_name(123, {}, players) == "Eris Thornveil"
+    players = {123: {"character_name": "Grog Stonefist", "player_name": "TestPlayer"}}
+    assert speaker_name(123, {}, players) == "Grog Stonefist"
 
 
 def test_speaker_name_falls_back_to_display_name_when_unmapped():
@@ -33,6 +33,6 @@ def test_speaker_name_falls_back_to_unknown_id_when_fully_unmapped():
 
 
 def test_speaker_name_prefers_players_mapping_over_display_name():
-    players = {123: {"character_name": "Eris Thornveil"}}
+    players = {123: {"character_name": "Grog Stonefist"}}
     member_names = {123: "SomePlayer"}
-    assert speaker_name(123, member_names, players) == "Eris Thornveil"
+    assert speaker_name(123, member_names, players) == "Grog Stonefist"
