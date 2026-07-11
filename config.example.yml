@@ -3,7 +3,11 @@ discord:
 
 ollama:
   host: "http://localhost:11434"
-  model: "gemma4-unsloth-nothink:latest"  # or any local Ollama tag, e.g. hf.co/unsloth/gemma-4-E4B-it-qat-GGUF:UD-Q4_K_XL
+  model: "gemma4:e4b-it-qat"  # or any local Ollama tag, e.g. hf.co/unsloth/gemma-4-E4B-it-qat-GGUF:UD-Q4_K_XL
+  timeout: 300  # seconds to wait for a summary before giving up (long transcripts on a slow model can take a while)
+  num_ctx: 32768  # context window in tokens — must fit the whole merged transcript or it gets silently
+                   # truncated. Multi-hour sessions may need this raised further (check the model's max
+                   # supported context with `ollama show <model>`); bigger values use more RAM/VRAM.
 
 whisper:
   model_size: "turbo"    # tiny, base, small, medium, large-v2, large-v3, turbo
@@ -11,6 +15,7 @@ whisper:
   compute_type: "int8"
   language: null         # e.g. "en", or null to auto-detect
   hf_token: null          # only needed for gated models
+  vad_filter: true        # skip silence/non-speech before transcribing (avoids hallucinated text on long silence)
 
 players:
   - discord_id: 123456789012345678

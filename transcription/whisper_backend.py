@@ -23,9 +23,19 @@ def transcribe(
     compute_type: str = "int8",
     language: str | None = None,
     hf_token: str | None = None,
+    vad_filter: bool = True,
 ) -> list[Segment]:
     model = _load_model(model_size, device, compute_type, hf_token)
-    segments, _info = model.transcribe(audio_path, beam_size=5, language=language)
+    segments, _info = model.transcribe(
+        audio_path,
+        beam_size=5,
+        language=language,
+        vad_filter=vad_filter,  # skip non-speech regions entirely — without this, Whisper hallucinates
+        # (e.g. "Thank you." / "I'll be right back." on a loop) when fed long stretches of silence,
+        # which AlignedOGGSink's alignment padding deliberately introduces for anyone who pauses or steps away
+        condition_on_previous_text=False,  # don't seed each segment's decode with the last one's text — a single
+        # hallucinated segment can otherwise compound into a runaway repeated-phrase loop across later segments
+    )
     return [Segment(s.start, s.end, s.text) for s in segments]
 
 

@@ -3,6 +3,7 @@ import datetime as dt
 import logging
 import os
 import re
+import urllib.error
 
 import discord
 import yaml
@@ -10,12 +11,35 @@ import yaml
 from recorder import session as rec_session
 from recorder.sink import save_audio
 from summarization.ollama_client import summarize
-from summarization.prompts import DND_RECAP_SYSTEM_PROMPT
+from summarization.prompts import DND_RECAP_SYSTEM_PROMPT, SHORT_RECAP_SYSTEM_PROMPT
 from transcription.merge import format_transcript, merge_segments
 from transcription.whisper_backend import transcribe
 
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("dungeonwhispers")
+
+
+class _BenignVoiceErrorFilter(logging.Filter):
+    """Downgrades known-benign py-cord voice errors from ERROR to WARNING (see CLAUDE.md
+    gotchas — both confirmed non-fatal). Keeps them visible, just not flagged as failures."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno < logging.ERROR:
+            return True
+        message = record.getMessage()
+        if message.startswith("Disconnected from voice... Reconnecting in"):
+            record.levelno = logging.WARNING
+            record.levelname = "WARNING"
+        elif message == "An exception occurred while decoding voice packets" and record.exc_info:
+            exc = record.exc_info[1]
+            if isinstance(exc, AttributeError) and "RTPPacket" in str(exc):
+                record.levelno = logging.WARNING
+                record.levelname = "WARNING"
+        return True
+
+
+logging.getLogger("discord.voice.state").addFilter(_BenignVoiceErrorFilter())
+logging.getLogger("discord.voice.receive.reader").addFilter(_BenignVoiceErrorFilter())
 
 with open("config.yml") as f:
     CONFIG = yaml.safe_load(f)
@@ -36,6 +60,15 @@ IDLE_ACTIVITY = discord.Activity(type=discord.ActivityType.listening, name="/rec
 async def on_ready():
     log.info("Logged in as %s — ready.", bot.user)
     await bot.change_presence(status=discord.Status.online, activity=IDLE_ACTIVITY)
+
+
+def load_campaign_context() -> str:
+    """Reads campaign_context.md fresh each call (no restart needed to update it between sessions)."""
+    try:
+        with open("campaign_context.md") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return ""
 
 
 def slugify(name: str) -> str:
@@ -104,7 +137,11 @@ async def record_stop(ctx: discord.ApplicationContext):
         await asyncio.to_thread(session.sink.cleanup)  # runs ffmpeg per speaker; some py-cord versions do this already
     except discord.sinks.SinkException:
         pass  # already cleaned up by AudioReader itself
-    await session.voice_client.disconnect()
+    # force=True: disconnect(force=False) is a silent no-op if the connection state machine
+    # isn't in exactly the "connected" state at that instant (e.g. mid voice-reconnect race) —
+    # confirmed to otherwise leave py-cord's background reconnect task running indefinitely
+    # against a channel we've already left, spamming "Could not connect to voice... Retrying...".
+    await session.voice_client.disconnect(force=True)
     rec_session.end(ctx.guild.id)
     log.info("Audio finalized, disconnected from voice.")
 
@@ -129,6 +166,7 @@ async def record_stop(ctx: discord.ApplicationContext):
             compute_type=whisper_cfg["compute_type"],
             language=whisper_cfg["language"],
             hf_token=whisper_cfg.get("hf_token"),
+            vad_filter=whisper_cfg.get("vad_filter", True),
         )
         log.info("  -> %d segment(s).", len(segments))
         speaker_segments[name] = segments
@@ -144,16 +182,32 @@ async def record_stop(ctx: discord.ApplicationContext):
 
     ollama_cfg = CONFIG["ollama"]
     log.info("Summarizing via Ollama (%s)...", ollama_cfg["model"])
-    summary = await asyncio.to_thread(
-        summarize,
-        transcript_text,
-        DND_RECAP_SYSTEM_PROMPT,
-        model=ollama_cfg["model"],
-        host=ollama_cfg["host"],
-    )
-    log.info("Summary generated (%d chars).", len(summary))
-
     out_path = f"transcripts/{session_id}.md"
+    campaign_context = load_campaign_context()
+    recap_system_prompt = DND_RECAP_SYSTEM_PROMPT
+    if campaign_context:
+        recap_system_prompt += f"\n\n## Campaign Context (for reference/continuity only)\n\n{campaign_context}"
+    try:
+        summary = await asyncio.to_thread(
+            summarize,
+            transcript_text,
+            recap_system_prompt,
+            model=ollama_cfg["model"],
+            host=ollama_cfg["host"],
+            timeout=ollama_cfg.get("timeout", 300.0),
+            num_ctx=ollama_cfg.get("num_ctx", 32768),
+        )
+        log.info("Summary generated (%d chars).", len(summary))
+    except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+        log.error("Ollama summarization failed: %s", e)
+        with open(out_path, "w") as f:
+            f.write(f"# {display_name}\n\n## Summary\n\n*Summarization failed: {e}*\n\n## Full Transcript\n\n{transcript_text}\n")
+        await ctx.channel.send(
+            f"⚠️ Couldn't reach Ollama to summarize (`{e}`). Transcript still saved to `{out_path}`."
+        )
+        await bot.change_presence(status=discord.Status.online, activity=IDLE_ACTIVITY)
+        return
+
     with open(out_path, "w") as f:
         f.write(f"# {display_name}\n\n## Summary\n\n{summary}\n\n## Full Transcript\n\n{transcript_text}\n")
     log.info("Transcript saved to %s", out_path)
@@ -161,7 +215,27 @@ async def record_stop(ctx: discord.ApplicationContext):
     # ponytail: raw audio + per-speaker transcripts kept for debugging, not deleted. Re-add cleanup once the
     # pipeline is trusted (see CLAUDE.md convention: "Delete raw audio after processing").
 
-    await ctx.channel.send(f"**Session Recap — {display_name}**\n\n{summary}\n\nFull transcript saved to `{out_path}`.")
+    # Discord caps messages at 2000 chars, and the full recap isn't meant to live in chat anyway (it goes to
+    # transcripts/ for later import elsewhere) — so post a short "it worked" note instead of the full summary.
+    try:
+        short_summary = await asyncio.to_thread(
+            summarize,
+            summary,
+            SHORT_RECAP_SYSTEM_PROMPT,
+            model=ollama_cfg["model"],
+            host=ollama_cfg["host"],
+            timeout=ollama_cfg.get("timeout", 300.0),
+            num_ctx=ollama_cfg.get("num_ctx", 32768),
+        )
+        short_summary = short_summary.strip()
+    except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+        log.warning("Short recap generation failed, falling back to a plain note: %s", e)
+        short_summary = "(short recap unavailable, see full transcript)"
+
+    message = f"✅ **{display_name}** complete.\n\n{short_summary}\n\nFull recap saved to `{out_path}`."
+    if len(message) > 2000:
+        message = message[:1997] + "..."
+    await ctx.channel.send(message)
     await bot.change_presence(status=discord.Status.online, activity=IDLE_ACTIVITY)
     log.info("Session '%s' complete.", display_name)
 

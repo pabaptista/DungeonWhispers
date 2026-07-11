@@ -2,13 +2,15 @@ from dataclasses import dataclass, field
 
 import discord
 
+from recorder.sink import AlignedOGGSink
+
 
 @dataclass
 class RecordingSession:
     guild_id: int
     voice_client: discord.VoiceClient
     text_channel: discord.TextChannel
-    sink: discord.sinks.OGGSink = field(default_factory=discord.sinks.OGGSink)
+    sink: discord.sinks.OGGSink = field(default_factory=AlignedOGGSink)
     member_names: dict[int, str] = field(default_factory=dict)
     name: str | None = None
 
