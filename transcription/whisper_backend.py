@@ -1,7 +1,11 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 from functools import lru_cache
+from typing import TYPE_CHECKING
 
-from faster_whisper import WhisperModel
+if TYPE_CHECKING:
+    from faster_whisper import WhisperModel
 
 
 @dataclass
@@ -13,6 +17,11 @@ class Segment:
 
 @lru_cache(maxsize=4)
 def _load_model(model_size: str, device: str, compute_type: str, hf_token: str | None) -> WhisperModel:
+    # Deferred: importing faster_whisper eagerly costs ~500MB RSS on its own (CTranslate2's C++
+    # runtime initializes at import time, independent of any model actually being loaded) — not
+    # worth paying for the bot's entire uptime, most of which is spent idle between sessions.
+    from faster_whisper import WhisperModel
+
     return WhisperModel(model_size, device=device, compute_type=compute_type, use_auth_token=hf_token)
 
 
