@@ -34,9 +34,11 @@ Discord Voice Channel
 
 ```
 DungeonWhispers/
-├── bot.py                  # Discord bot entrypoint, slash commands (/record start, /record stop)
+├── bot.py                  # Discord bot entrypoint, slash commands (/record start|stop|status|list)
+├── naming.py                # Pure helpers (slugify, speaker_name) — split out of bot.py so they're
+│                             #   testable without needing a real config.yml/Discord client
 ├── recorder/
-│   ├── sink.py             # Voice capture, per-speaker OGG sink
+│   ├── sink.py             # Voice capture, per-speaker aligned OGG sink
 │   └── session.py          # Session lifecycle (start/stop/cleanup)
 ├── transcription/
 │   ├── whisper_backend.py  # faster-whisper wrapper, per-track transcription
@@ -50,6 +52,8 @@ DungeonWhispers/
 ├── campaign_context.md     # Real campaign context (gitignored, optional — skipped if absent)
 ├── raw_audio/              # Per-speaker OGG files (gitignored). NOT auto-deleted right now — see Conventions.
 ├── transcripts/            # Merged + per-speaker markdown transcripts, summaries (gitignored)
+├── tests/                  # pytest — currently covers naming.py and transcription/merge.py (pure,
+│                            #   no Discord/Ollama/config.yml needed). Run: `pytest`
 ├── requirements.txt
 ├── README.md
 └── CLAUDE.md / AGENTS.md   # This file
@@ -58,6 +62,7 @@ DungeonWhispers/
 ## Conventions
 
 - **Config over hardcoding:** Discord IDs, character name mappings, model sizes, and prompts live in `config.yml`, never hardcoded in source.
+- **Config is validated, not just loaded:** `bot.py`'s `validate_config()` checks required keys exist (`discord.bot_token`, `whisper.*`, `ollama.host`/`model`, each `players[]` entry) and fails fast with a clear message — at startup via `load_config()`, and again on every `/record start` (see Commands below) where a validation failure keeps the previous working config instead of crashing the bot.
 - **No secrets in git:** Discord bot token and `config.yml` are gitignored. Only `config.example.yml` (with placeholder values) is committed.
 - **Pluggable transcription backend:** Keep `transcription/whisper_backend.py` behind a simple interface (e.g. `transcribe(audio_path, language=None) -> list[Segment]`) so a different backend (API-based, different local model) can be swapped in without touching the rest of the pipeline.
 - **Delete raw audio after processing (currently disabled):** Multi-hour OGG tracks per speaker add up and should eventually be cleaned up after a transcript is generated and verified. **For now, while the recording/transcription pipeline is still being debugged, `bot.py` keeps `raw_audio/*.ogg` and the per-speaker debug transcripts in `transcripts/` — nothing is deleted.** Re-add cleanup (auto after N days, or a `--keep-audio` override) once the pipeline is trusted.
@@ -90,9 +95,12 @@ DungeonWhispers/
 
 ## Commands / Workflow
 
-- `/record start [name]` — bot joins the caller's current voice channel and begins per-speaker recording. `name` is optional (e.g. `"Session 10"`); defaults to a timestamp if omitted. Warns in the text channel if any speaker present isn't mapped in `config.yml` yet. Sets bot presence to 🔴 "Recording session" (status: dnd).
-- `/record stop` — bot stops recording, triggers transcription → merge → summarization pipeline, posts the recap + transcript path in the text channel. Sets presence to 📝 "Summarizing session..." (status: idle) while working, then back to idle listening for `/record start` when done.
-- `python3 bot.py [-v|--verbose]` — `-v` raises terminal log level from `WARNING` to `INFO`, printing per-step progress (join, transcribe per speaker, merge, summarize, save, cleanup).
+- `/record start [name]` — bot joins the caller's current voice channel and begins per-speaker recording. `name` is optional (e.g. `"Session 10"`); defaults to a timestamp if omitted. Rereads `config.yml` fresh on every call (no restart needed after adding a player) — a broken edit keeps the previous working config instead of crashing. Warns in the text channel if any speaker present isn't mapped in `config.yml` yet. Sets bot presence to 🔴 "Recording session" (status: dnd).
+- `/record stop` — bot stops recording, triggers transcription → merge → summarization pipeline, posting per-speaker progress pings along the way, then the recap + transcript path in the text channel. Gracefully handles nobody having spoken, and isolates per-speaker transcription failures (one bad track doesn't lose everyone else's). Sets presence to 📝 "Summarizing session..." (status: idle) while working, then back to idle listening for `/record start` when done.
+- `/record status` — shows the active session's name, elapsed running time, and which present speakers are mapped/unmapped in `config.yml`, without stopping the recording.
+- `/record list` — lists past sessions (from `transcripts/*.md`), newest first.
+- `python3 bot.py [-v|--verbose]` — `-v` raises terminal log level from `WARNING` to `INFO`, printing per-step progress (join, transcribe per speaker, merge, summarize, save, cleanup). Deliberately does *not* warm up the Whisper model at startup — the model (~1.5GB) stays resident once loaded (`_load_model` is `lru_cache`d, never evicted), so warming up at boot would hold that memory for the bot's entire uptime, including all idle time between sessions, just to save a few seconds on the first `/record stop`. Not worth it for a bot that may sit idle for days between game nights.
+- `pytest` — runs the test suite (`tests/`, currently `naming.py` + `transcription/merge.py`).
 
 ## For AI Agents Working on This Repo
 

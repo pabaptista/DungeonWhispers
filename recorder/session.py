@@ -1,3 +1,4 @@
+import datetime as dt
 from dataclasses import dataclass, field
 
 import discord
@@ -13,6 +14,7 @@ class RecordingSession:
     sink: discord.sinks.OGGSink = field(default_factory=AlignedOGGSink)
     member_names: dict[int, str] = field(default_factory=dict)
     name: str | None = None
+    started_at: dt.datetime = field(default_factory=dt.datetime.now)
 
 
 _active: dict[int, RecordingSession] = {}

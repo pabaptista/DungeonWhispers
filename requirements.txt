@@ -1,3 +1,4 @@
 py-cord[voice] @ git+https://github.com/Pycord-Development/pycord@fix/voice-rec-2
 faster-whisper
 pyyaml
+pytest

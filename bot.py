@@ -2,12 +2,12 @@ import asyncio
 import datetime as dt
 import logging
 import os
-import re
 import urllib.error
 
 import discord
 import yaml
 
+from naming import slugify, speaker_name
 from recorder import session as rec_session
 from recorder.sink import save_audio
 from summarization.ollama_client import summarize
@@ -41,9 +41,37 @@ class _BenignVoiceErrorFilter(logging.Filter):
 logging.getLogger("discord.voice.state").addFilter(_BenignVoiceErrorFilter())
 logging.getLogger("discord.voice.receive.reader").addFilter(_BenignVoiceErrorFilter())
 
-with open("config.yml") as f:
-    CONFIG = yaml.safe_load(f)
 
+def _require(cfg: dict, *path: str) -> None:
+    node = cfg
+    for i, key in enumerate(path):
+        if not isinstance(node, dict) or key not in node:
+            raise ValueError(f"config.yml is missing required key: {'.'.join(path[: i + 1])}")
+        node = node[key]
+
+
+def validate_config(cfg: dict) -> None:
+    _require(cfg, "discord", "bot_token")
+    _require(cfg, "whisper", "model_size")
+    _require(cfg, "whisper", "device")
+    _require(cfg, "whisper", "compute_type")
+    _require(cfg, "whisper", "language")  # may be null, but the key itself must exist
+    _require(cfg, "ollama", "host")
+    _require(cfg, "ollama", "model")
+    for i, player in enumerate(cfg.get("players") or []):
+        for key in ("discord_id", "player_name", "character_name"):
+            if key not in player:
+                raise ValueError(f"config.yml players[{i}] is missing required key: {key}")
+
+
+def load_config() -> dict:
+    with open("config.yml") as f:
+        cfg = yaml.safe_load(f)
+    validate_config(cfg)
+    return cfg
+
+
+CONFIG = load_config()
 PLAYERS = {p["discord_id"]: p for p in CONFIG.get("players") or []}
 
 intents = discord.Intents.default()
@@ -71,23 +99,24 @@ def load_campaign_context() -> str:
         return ""
 
 
-def slugify(name: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9]+", "-", name).strip("-").lower()
-
-
-def speaker_name(discord_id: int, member_names: dict[int, str]) -> str:
-    player = PLAYERS.get(discord_id)
-    if player:
-        return player["character_name"]
-    return member_names.get(discord_id, f"Unknown ({discord_id})")
-
-
 @record.command(name="start", description="Join your voice channel and start recording.")
 async def record_start(
     ctx: discord.ApplicationContext,
     name: discord.Option(str, "Name for this session, e.g. 'Session 10' (default: date/time)", required=False) = None,
 ):
     await ctx.defer()  # channel.connect() below can take a few seconds; ack before Discord's 3s interaction timeout
+
+    global CONFIG, PLAYERS
+    try:
+        # Reread config.yml so new players/settings apply without a bot restart. Validated before
+        # committing to the globals — a bad edit mid-session shouldn't crash the bot or wipe out a
+        # working config.
+        new_config = load_config()
+    except (OSError, ValueError, yaml.YAMLError) as e:
+        await ctx.respond(f"⚠️ config.yml failed to load, keeping the previous config (`{e}`).")
+        return
+    CONFIG = new_config
+    PLAYERS = {p["discord_id"]: p for p in CONFIG.get("players") or []}
 
     if ctx.author.voice is None:
         await ctx.respond("Join a voice channel first.")
@@ -112,13 +141,67 @@ async def record_start(
         "recorded and transcribed for a session summary — speak now if that's not OK with you."
     )
 
-    unmapped = [name for uid, name in session.member_names.items() if uid not in PLAYERS]
+    unmapped = [f"{name} (`{uid}`)" for uid, name in session.member_names.items() if uid not in PLAYERS]
     if unmapped:
         log.warning("Not in config.yml: %s", ", ".join(unmapped))
         await ctx.channel.send(
             "⚠️ Not in `config.yml` yet: " + ", ".join(unmapped) + ". "
-            "They'll show up in the transcript under their Discord display name instead of a character name."
+            "They'll show up in the transcript under their Discord display name instead of a character name. "
+            "Add them under `players:` with `discord_id: <id above>` to fix."
         )
+
+
+@record.command(name="status", description="Show the active recording session's status.")
+async def record_status(ctx: discord.ApplicationContext):
+    session = rec_session.get(ctx.guild.id)
+    if not session:
+        await ctx.respond("No recording in progress.")
+        return
+
+    elapsed = str(dt.datetime.now() - session.started_at).split(".")[0]
+    title = f" **{session.name}**" if session.name else ""
+    mapped = [n for uid, n in session.member_names.items() if uid in PLAYERS]
+    unmapped = [f"{n} (`{uid}`)" for uid, n in session.member_names.items() if uid not in PLAYERS]
+
+    lines = [f"🔴 Recording{title} — running for {elapsed}."]
+    if mapped:
+        lines.append("Mapped: " + ", ".join(mapped))
+    if unmapped:
+        lines.append("⚠️ Not in `config.yml`: " + ", ".join(unmapped))
+    await ctx.respond("\n".join(lines))
+
+
+@record.command(name="list", description="List past recorded sessions.")
+async def record_list(ctx: discord.ApplicationContext):
+    if not os.path.isdir("transcripts"):
+        await ctx.respond("No sessions recorded yet.")
+        return
+
+    sessions = []
+    for fname in sorted(os.listdir("transcripts"), reverse=True):
+        if not fname.endswith(".md"):
+            continue
+        # Merged session files start with a top-level "# Title" header; the per-speaker debug
+        # transcripts (also *.md, same directory) are raw segment dumps with no header — this is
+        # what tells them apart, since session_id itself can contain underscores so filenames alone
+        # aren't reliably distinguishable from the debug ones.
+        with open(os.path.join("transcripts", fname)) as f:
+            first_line = f.readline()
+        if first_line.startswith("# "):
+            sessions.append((fname, first_line[2:].strip()))
+
+    if not sessions:
+        await ctx.respond("No sessions recorded yet.")
+        return
+
+    shown = sessions[:15]
+    lines = [f"**{title}** — `{fname}`" for fname, title in shown]
+    message = "📼 Past sessions:\n" + "\n".join(lines)
+    if len(sessions) > len(shown):
+        message += f"\n...and {len(sessions) - len(shown)} more."
+    if len(message) > 2000:
+        message = message[:1997] + "..."
+    await ctx.respond(message)
 
 
 @record.command(name="stop", description="Stop recording and post the session summary.")
@@ -151,30 +234,49 @@ async def record_stop(ctx: discord.ApplicationContext):
     audio_paths = save_audio(session.sink, session_id)
     log.info("Saved %d speaker track(s) to raw_audio/.", len(audio_paths))
 
+    if not audio_paths:
+        await ctx.channel.send(f"🔇 No one spoke during **{display_name}** — nothing to transcribe or summarize.")
+        await bot.change_presence(status=discord.Status.online, activity=IDLE_ACTIVITY)
+        log.info("Session '%s' had no speaker audio, nothing to do.", display_name)
+        return
+
     os.makedirs("transcripts", exist_ok=True)
 
     whisper_cfg = CONFIG["whisper"]
     speaker_segments = {}
     for user_id, path in audio_paths.items():
-        name = speaker_name(user_id, session.member_names)
+        name = speaker_name(user_id, session.member_names, PLAYERS)
         log.info("Transcribing %s (%s)...", name, path)
-        segments = await asyncio.to_thread(
-            transcribe,
-            path,
-            model_size=whisper_cfg["model_size"],
-            device=whisper_cfg["device"],
-            compute_type=whisper_cfg["compute_type"],
-            language=whisper_cfg["language"],
-            hf_token=whisper_cfg.get("hf_token"),
-            vad_filter=whisper_cfg.get("vad_filter", True),
-        )
+        try:
+            segments = await asyncio.to_thread(
+                transcribe,
+                path,
+                model_size=whisper_cfg["model_size"],
+                device=whisper_cfg["device"],
+                compute_type=whisper_cfg["compute_type"],
+                language=whisper_cfg["language"],
+                hf_token=whisper_cfg.get("hf_token"),
+                vad_filter=whisper_cfg.get("vad_filter", True),
+            )
+        except Exception as e:
+            # One corrupt/empty track shouldn't discard everyone else's already-completed transcription.
+            log.error("Transcription failed for %s (%s): %s", name, path, e)
+            await ctx.channel.send(f"⚠️ Transcription failed for **{name}** — they'll be missing from this recap (`{e}`).")
+            continue
         log.info("  -> %d segment(s).", len(segments))
         speaker_segments[name] = segments
+        await ctx.channel.send(f"✅ Transcribed **{name}** ({len(segments)} segment(s)).")
 
         # debug: keep each speaker's raw transcript around, separate from the merged one below
         speaker_path = f"transcripts/{session_id}_{slugify(name)}.md"
         with open(speaker_path, "w") as f:
             f.write("\n".join(f"[{s.start:.1f}s -> {s.end:.1f}s] {s.text.strip()}" for s in segments) + "\n")
+
+    if not speaker_segments:
+        await ctx.channel.send(f"⚠️ Transcription failed for everyone in **{display_name}** — nothing to summarize.")
+        await bot.change_presence(status=discord.Status.online, activity=IDLE_ACTIVITY)
+        log.info("Session '%s': all speaker transcriptions failed.", display_name)
+        return
 
     timeline = merge_segments(speaker_segments)
     transcript_text = format_transcript(timeline)
@@ -182,6 +284,7 @@ async def record_stop(ctx: discord.ApplicationContext):
 
     ollama_cfg = CONFIG["ollama"]
     log.info("Summarizing via Ollama (%s)...", ollama_cfg["model"])
+    await ctx.channel.send(f"🧠 All speakers transcribed ({len(timeline)} line(s)) — summarizing via Ollama now...")
     out_path = f"transcripts/{session_id}.md"
     campaign_context = load_campaign_context()
     recap_system_prompt = DND_RECAP_SYSTEM_PROMPT
