@@ -2,6 +2,7 @@ import io
 import logging
 import os
 import time
+import uuid
 
 import discord
 from discord.sinks.core import AudioData, Filters
@@ -14,6 +15,11 @@ log = logging.getLogger("dungeonwhispers")
 # byte count.
 _BYTES_PER_SECOND = 48000 * 2 * 2
 _FRAME_SIZE = 4  # 2 bytes/sample * 2 channels; pad only to whole-sample boundaries
+
+# Scratch dir for raw per-speaker PCM during a live recording (module-level so tests can
+# monkeypatch it). Deliberately not /tmp or tempfile.gettempdir(): those are commonly tmpfs
+# (RAM-backed) on Linux, which would defeat the point of writing to disk instead of memory.
+_SCRATCH_DIR = os.path.join("raw_audio", "scratch")
 
 
 class AlignedOGGSink(discord.sinks.OGGSink):
@@ -38,6 +44,9 @@ class AlignedOGGSink(discord.sinks.OGGSink):
         super().__init__(filters=filters)
         self._session_start: float | None = None
         self._bytes_written: dict[object, int] = {}
+        self._scratch_token = uuid.uuid4().hex  # unique per sink instance, avoids collisions across concurrent guild sessions
+        self._scratch_seq = 0  # per-speaker counter for unique filenames
+        self._scratch_files: dict[AudioData, tuple[str, io.IOBase]] = {}
 
     @Filters.container
     def write(self, data: VoiceData | bytes, user) -> None:
@@ -47,8 +56,15 @@ class AlignedOGGSink(discord.sinks.OGGSink):
             self._session_start = time.perf_counter()
 
         if user not in self.audio_data:
-            self.audio_data[user] = AudioData(io.BytesIO())
+            os.makedirs(_SCRATCH_DIR, exist_ok=True)
+            user_key = getattr(user, "id", user)  # matches the normalization save_audio() already uses
+            scratch_path = os.path.join(_SCRATCH_DIR, f"{self._scratch_token}_{self._scratch_seq}_{user_key}.pcm")
+            self._scratch_seq += 1
+            raw_file = open(scratch_path, "w+b")  # write+read+seek: AudioData.cleanup() seeks to 0, format_audio() reads it back
+            audio = AudioData(raw_file)
+            self.audio_data[user] = audio
             self._bytes_written[user] = 0
+            self._scratch_files[audio] = (scratch_path, raw_file)
 
         elapsed = time.perf_counter() - self._session_start
         expected_bytes = int(elapsed * _BYTES_PER_SECOND)
@@ -61,6 +77,21 @@ class AlignedOGGSink(discord.sinks.OGGSink):
 
         self.audio_data[user].write(pcm_data)
         self._bytes_written[user] = written + len(pcm_data)
+
+    def format_audio(self, audio: AudioData) -> None:
+        scratch = self._scratch_files.pop(audio, None)
+        super().format_audio(audio)  # ffmpeg encode; reassigns audio.file to the small in-memory OGG BytesIO
+        if scratch is None:
+            return
+        scratch_path, raw_file = scratch
+        try:
+            raw_file.close()
+        except OSError:
+            pass
+        try:
+            os.remove(scratch_path)
+        except FileNotFoundError:
+            pass
 
 
 def save_audio(sink: discord.sinks.OGGSink, session_id: str) -> dict[int, str]:
