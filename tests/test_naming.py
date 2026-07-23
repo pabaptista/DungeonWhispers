@@ -1,4 +1,4 @@
-from naming import slugify, speaker_name
+from naming import resolve_user_id, slugify, speaker_name
 
 
 def test_slugify_lowercases_and_hyphenates():
@@ -36,3 +36,15 @@ def test_speaker_name_prefers_players_mapping_over_display_name():
     players = {123: {"character_name": "Grog Stonefist"}}
     member_names = {123: "SomePlayer"}
     assert speaker_name(123, member_names, players) == "Grog Stonefist"
+
+
+def test_resolve_user_id_returns_id_attribute_when_present():
+    class FakeMember:
+        id = 42
+
+    assert resolve_user_id(FakeMember()) == 42
+
+
+def test_resolve_user_id_returns_value_unchanged_when_no_id_attribute():
+    assert resolve_user_id(42) == 42
+    assert resolve_user_id(None) is None

@@ -87,7 +87,10 @@ IDLE_ACTIVITY = discord.Activity(type=discord.ActivityType.listening, name="/rec
 @bot.event
 async def on_ready():
     log.info("Logged in as %s — ready.", bot.user)
-    await bot.change_presence(status=discord.Status.online, activity=IDLE_ACTIVITY)
+    try:
+        await bot.change_presence(status=discord.Status.online, activity=IDLE_ACTIVITY)
+    except Exception as e:
+        log.error("Failed to set initial presence: %s", e)
 
 
 def load_campaign_context() -> str:
@@ -218,13 +221,27 @@ async def record_stop(ctx: discord.ApplicationContext):
     session.voice_client.stop_recording()
     try:
         await asyncio.to_thread(session.sink.cleanup)  # runs ffmpeg per speaker; some py-cord versions do this already
+    except discord.sinks.OGGSinkError as exc:
+        # AlignedOGGSink.format_audio() already isolates a per-speaker ffmpeg failure so it can't
+        # abort py-cord's cleanup loop for the rest — this is a fallback for an OGGSinkError at
+        # the loop level itself, logged loudly rather than letting the broader SinkException catch
+        # below silently swallow it (OGGSinkError is a SinkException).
+        log.error("ffmpeg failed while encoding recorded audio, some speakers' audio may be lost: %s", exc)
     except discord.sinks.SinkException:
         pass  # already cleaned up by AudioReader itself
     # force=True: disconnect(force=False) is a silent no-op if the connection state machine
     # isn't in exactly the "connected" state at that instant (e.g. mid voice-reconnect race) —
     # confirmed to otherwise leave py-cord's background reconnect task running indefinitely
     # against a channel we've already left, spamming "Could not connect to voice... Retrying...".
-    await session.voice_client.disconnect(force=True)
+    try:
+        await session.voice_client.disconnect(force=True)
+    except Exception as e:
+        # Recorded audio is already finalized above regardless (sink.cleanup() ran first), so
+        # this doesn't block the transcribe/summarize pipeline — but a failure here can mean the
+        # bot is still connected to the voice channel in an inconsistent state, so it shouldn't
+        # be silent.
+        log.error("Failed to disconnect voice client: %s", e)
+        await ctx.channel.send(f"⚠️ Failed to cleanly disconnect from voice (`{e}`) — may need a manual kick/rejoin.")
     rec_session.end(ctx.guild.id)
     log.info("Audio finalized, disconnected from voice.")
 

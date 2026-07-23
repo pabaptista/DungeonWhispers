@@ -8,6 +8,8 @@ import discord
 from discord.sinks.core import AudioData, Filters
 from discord.voice.packets import VoiceData
 
+from naming import resolve_user_id
+
 log = logging.getLogger("dungeonwhispers")
 
 # Discord voice receive is always 48kHz/16-bit/stereo PCM (matches the "-ar 48000 -ac 2 -f s16le"
@@ -47,20 +49,34 @@ class AlignedOGGSink(discord.sinks.OGGSink):
         self._scratch_token = uuid.uuid4().hex  # unique per sink instance, avoids collisions across concurrent guild sessions
         self._scratch_seq = 0  # per-speaker counter for unique filenames
         self._scratch_files: dict[AudioData, tuple[str, io.IOBase]] = {}
+        self._failed_users: set[object] = set()  # scratch-file open already failed once; don't retry every packet
 
     @Filters.container
     def write(self, data: VoiceData | bytes, user) -> None:
+        if user in self._failed_users:
+            return
+
         pcm_data = data.pcm if isinstance(data, VoiceData) else data
 
         if self._session_start is None:
             self._session_start = time.perf_counter()
 
         if user not in self.audio_data:
-            os.makedirs(_SCRATCH_DIR, exist_ok=True)
-            user_key = getattr(user, "id", user)  # matches the normalization save_audio() already uses
+            user_key = resolve_user_id(user)
             scratch_path = os.path.join(_SCRATCH_DIR, f"{self._scratch_token}_{self._scratch_seq}_{user_key}.pcm")
             self._scratch_seq += 1
-            raw_file = open(scratch_path, "w+b")  # write+read+seek: AudioData.cleanup() seeks to 0, format_audio() reads it back
+            try:
+                os.makedirs(_SCRATCH_DIR, exist_ok=True)
+                raw_file = open(scratch_path, "w+b")  # write+read+seek: AudioData.cleanup() seeks to 0, format_audio() reads it back
+            except OSError:
+                # Disk full, permission error, etc. Isolate the failure to this one speaker
+                # rather than letting it propagate out of write() and kill the whole session's
+                # recording — same "one bad track doesn't lose everyone else's" posture bot.py
+                # already applies to per-speaker transcription failures. Remembered so we don't
+                # retry (and re-log a full traceback) on every subsequent ~20ms packet for them.
+                self._failed_users.add(user)
+                log.error("Could not create scratch file for speaker %s; dropping their audio for this session.", user_key, exc_info=True)
+                return
             audio = AudioData(raw_file)
             self.audio_data[user] = audio
             self._bytes_written[user] = 0
@@ -72,7 +88,13 @@ class AlignedOGGSink(discord.sinks.OGGSink):
 
         written = self._bytes_written[user]
         if expected_bytes > written:
-            self.audio_data[user].write(b"\x00" * (expected_bytes - written))
+            # Write silence in 64KB chunks to avoid a temporary ~29 MB+ bytes object
+            # for a silent speaker (b"\x00" * N would otherwise spike RSS proportionally).
+            silence_size = expected_bytes - written
+            while silence_size > 0:
+                chunk = min(silence_size, 65536)
+                self.audio_data[user].write(b"\x00" * chunk)
+                silence_size -= chunk
             written = expected_bytes
 
         self.audio_data[user].write(pcm_data)
@@ -80,18 +102,31 @@ class AlignedOGGSink(discord.sinks.OGGSink):
 
     def format_audio(self, audio: AudioData) -> None:
         scratch = self._scratch_files.pop(audio, None)
-        super().format_audio(audio)  # ffmpeg encode; reassigns audio.file to the small in-memory OGG BytesIO
-        if scratch is None:
-            return
-        scratch_path, raw_file = scratch
         try:
-            raw_file.close()
-        except OSError:
-            pass
-        try:
-            os.remove(scratch_path)
-        except FileNotFoundError:
-            pass
+            super().format_audio(audio)  # ffmpeg encode; reassigns audio.file to the small in-memory OGG BytesIO
+        except discord.sinks.OGGSinkError as exc:
+            # base Sink.cleanup() does `for file in self.audio_data.values(): file.cleanup();
+            # self.format_audio(file)` — letting this propagate would abort that loop and skip
+            # format_audio() for every speaker after this one in iteration order, leaking their
+            # scratch files too. Isolate to this one speaker instead; save_audio() drops anyone
+            # left with audio.file is None.
+            log.error("ffmpeg failed to encode audio for a speaker; their track will be dropped: %s", exc)
+            audio.file = None
+        finally:
+            # Always clean up the scratch file, even if ffmpeg raised (e.g. missing binary) —
+            # otherwise the raw PCM leaks on disk with no reference left to remove it later.
+            if scratch is not None:
+                scratch_path, raw_file = scratch
+                try:
+                    raw_file.close()
+                except OSError as exc:
+                    log.warning("Failed to close scratch file %s: %s", scratch_path, exc)
+                try:
+                    os.remove(scratch_path)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    log.warning("Failed to remove scratch file %s: %s", scratch_path, exc)
 
 
 def save_audio(sink: discord.sinks.OGGSink, session_id: str) -> dict[int, str]:
@@ -106,7 +141,13 @@ def save_audio(sink: discord.sinks.OGGSink, session_id: str) -> dict[int, str]:
             data = audio.file.read()
             log.warning("Discarding %d byte(s) of audio from an unresolved speaker (unmapped SSRC).", len(data))
             continue
-        user_id = getattr(user, "id", user)  # py-cord versions key audio_data by User/Member or by raw int id
+        if audio.file is None:
+            # format_audio() marks a speaker this way when their ffmpeg encode failed (see
+            # AlignedOGGSink.format_audio) — their scratch PCM is already gone, nothing to save.
+            log.warning("Skipping speaker %s: audio encoding failed for this session.", resolve_user_id(user))
+            continue
+        user_id = resolve_user_id(user)  # py-cord versions key audio_data by User/Member or by raw int id
+        assert user_id is not None  # guaranteed by the `user is None` check above; keeps `paths` honestly `dict[int, str]`
         path = f"raw_audio/{session_id}_{user_id}.ogg"
         with open(path, "wb") as f:
             f.write(audio.file.read())

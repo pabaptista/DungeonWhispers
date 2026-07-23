@@ -6,7 +6,7 @@ import discord.sinks.ogg as sinks_ogg
 import pytest
 
 import recorder.sink as sink_module
-from recorder.sink import AlignedOGGSink, _FRAME_SIZE
+from recorder.sink import AlignedOGGSink, _FRAME_SIZE, save_audio
 
 pytestmark = pytest.mark.usefixtures("_scratch_dir")
 
@@ -109,3 +109,95 @@ def test_double_cleanup_raises_sink_exception_without_leaking():
     s.cleanup()
     with pytest.raises(sinks_core.SinkException):
         s.cleanup()
+
+
+def test_write_remembers_scratch_open_failure_and_stops_retrying(tmp_path, monkeypatch):
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory")  # os.makedirs(_SCRATCH_DIR) fails: path exists as a file
+    monkeypatch.setattr(sink_module, "_SCRATCH_DIR", str(blocker))
+
+    calls = []
+    real_makedirs = os.makedirs
+
+    def counting_makedirs(path, exist_ok=False):
+        calls.append(path)
+        return real_makedirs(path, exist_ok=exist_ok)
+
+    monkeypatch.setattr(sink_module.os, "makedirs", counting_makedirs)
+
+    s = AlignedOGGSink()
+    s.write(b"\x00" * 8, "user-a")
+    s.write(b"\x00" * 8, "user-a")  # second packet for the same speaker
+
+    assert "user-a" not in s.audio_data
+    assert "user-a" in s._failed_users
+    assert len(calls) == 1  # not retried on the second packet
+
+
+def test_format_audio_marks_failed_encode_but_still_cleans_up_scratch():
+    def failing_format_audio(self, audio):
+        raise sinks_ogg.OGGSinkError("ffmpeg was not found.")
+
+    import discord.sinks.ogg as ogg_module
+
+    orig = ogg_module.OGGSink.format_audio
+    ogg_module.OGGSink.format_audio = failing_format_audio
+    try:
+        s = AlignedOGGSink()
+        s.write(b"\x00" * 8, "user-a")
+        scratch_path, _ = s._scratch_files[s.audio_data["user-a"]]
+
+        s.cleanup()  # base Sink.cleanup() loop must not abort here
+
+        assert s.audio_data["user-a"].file is None
+        assert not os.path.exists(scratch_path)
+    finally:
+        ogg_module.OGGSink.format_audio = orig
+
+
+def test_save_audio_writes_files_and_returns_int_keyed_paths(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    class FakeUser:
+        id = 111
+
+    s = AlignedOGGSink()
+    s.write(b"\x00" * 8, FakeUser())
+    s.cleanup()
+
+    paths = save_audio(s, "session1")
+
+    assert paths == {111: "raw_audio/session1_111.ogg"}
+    with open("raw_audio/session1_111.ogg", "rb") as f:
+        assert f.read() == b"fake-encoded"
+
+
+def test_save_audio_drops_unresolved_ssrc(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    s = AlignedOGGSink()
+    s.write(b"\x00" * 8, None)
+    s.cleanup()
+
+    paths = save_audio(s, "session1")
+
+    assert paths == {}
+    assert os.listdir("raw_audio") == []
+
+
+def test_save_audio_skips_speaker_with_failed_encode(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    def failing_format_audio(self, audio):
+        raise sinks_ogg.OGGSinkError("ffmpeg was not found.")
+
+    monkeypatch.setattr(sinks_ogg.OGGSink, "format_audio", failing_format_audio)
+
+    s = AlignedOGGSink()
+    s.write(b"\x00" * 8, "user-a")
+    s.cleanup()
+
+    paths = save_audio(s, "session1")
+
+    assert paths == {}
+    assert os.listdir("raw_audio") == []
