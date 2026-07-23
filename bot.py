@@ -10,7 +10,7 @@ import yaml
 from naming import slugify, speaker_name
 from recorder import session as rec_session
 from recorder.sink import save_audio
-from summarization.ollama_client import summarize
+from summarization.llm_client import is_up, summarize
 from summarization.prompts import DND_RECAP_SYSTEM_PROMPT, SHORT_RECAP_SYSTEM_PROMPT
 from transcription.merge import format_transcript, merge_segments
 from transcription.whisper_backend import transcribe
@@ -56,8 +56,8 @@ def validate_config(cfg: dict) -> None:
     _require(cfg, "whisper", "device")
     _require(cfg, "whisper", "compute_type")
     _require(cfg, "whisper", "language")  # may be null, but the key itself must exist
-    _require(cfg, "ollama", "host")
-    _require(cfg, "ollama", "model")
+    _require(cfg, "llm", "host")
+    _require(cfg, "llm", "model")
     for i, player in enumerate(cfg.get("players") or []):
         for key in ("discord_id", "player_name", "character_name"):
             if key not in player:
@@ -299,9 +299,18 @@ async def record_stop(ctx: discord.ApplicationContext):
     transcript_text = format_transcript(timeline)
     log.info("Merged timeline: %d line(s) total.", len(timeline))
 
-    ollama_cfg = CONFIG["ollama"]
-    log.info("Summarizing via Ollama (%s)...", ollama_cfg["model"])
-    await ctx.channel.send(f"🧠 All speakers transcribed ({len(timeline)} line(s)) — summarizing via Ollama now...")
+    llm_cfg = CONFIG["llm"]
+    if not await asyncio.to_thread(is_up, llm_cfg["host"]):
+        await ctx.channel.send(
+            f"⏸️ LLM server not reachable at `{llm_cfg['host']}` — start `llama-server` and I'll resume automatically. "
+            "Transcript is safe either way."
+        )
+        while not await asyncio.to_thread(is_up, llm_cfg["host"]):
+            await asyncio.sleep(10)
+        await ctx.channel.send("▶️ LLM server detected, resuming summarization.")
+
+    log.info("Summarizing via LLM server (%s)...", llm_cfg["model"])
+    await ctx.channel.send(f"🧠 All speakers transcribed ({len(timeline)} line(s)) — summarizing now...")
     out_path = f"transcripts/{session_id}.md"
     campaign_context = load_campaign_context()
     recap_system_prompt = DND_RECAP_SYSTEM_PROMPT
@@ -312,18 +321,17 @@ async def record_stop(ctx: discord.ApplicationContext):
             summarize,
             transcript_text,
             recap_system_prompt,
-            model=ollama_cfg["model"],
-            host=ollama_cfg["host"],
-            timeout=ollama_cfg.get("timeout", 300.0),
-            num_ctx=ollama_cfg.get("num_ctx", 32768),
+            model=llm_cfg["model"],
+            host=llm_cfg["host"],
+            timeout=llm_cfg.get("timeout", 300.0),
         )
         log.info("Summary generated (%d chars).", len(summary))
     except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
-        log.error("Ollama summarization failed: %s", e)
+        log.error("LLM summarization failed: %s", e)
         with open(out_path, "w") as f:
             f.write(f"# {display_name}\n\n## Summary\n\n*Summarization failed: {e}*\n\n## Full Transcript\n\n{transcript_text}\n")
         await ctx.channel.send(
-            f"⚠️ Couldn't reach Ollama to summarize (`{e}`). Transcript still saved to `{out_path}`."
+            f"⚠️ Couldn't reach the LLM server to summarize (`{e}`). Transcript still saved to `{out_path}`."
         )
         await bot.change_presence(status=discord.Status.online, activity=IDLE_ACTIVITY)
         return
@@ -342,10 +350,9 @@ async def record_stop(ctx: discord.ApplicationContext):
             summarize,
             summary,
             SHORT_RECAP_SYSTEM_PROMPT,
-            model=ollama_cfg["model"],
-            host=ollama_cfg["host"],
-            timeout=ollama_cfg.get("timeout", 300.0),
-            num_ctx=ollama_cfg.get("num_ctx", 32768),
+            model=llm_cfg["model"],
+            host=llm_cfg["host"],
+            timeout=llm_cfg.get("timeout", 300.0),
         )
         short_summary = short_summary.strip()
     except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
